@@ -1,4 +1,4 @@
-FROM golang:1.19.7
+FROM golang:1.19.7-buster
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
                 openssh-client \
