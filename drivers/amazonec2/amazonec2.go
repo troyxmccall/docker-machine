@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+
 	"github.com/docker/machine/drivers/driverutil"
 	"github.com/docker/machine/libmachine/drivers"
 	"github.com/docker/machine/libmachine/log"
@@ -28,21 +29,23 @@ import (
 )
 
 const (
-	driverName                  = "amazonec2"
-	ipRange                     = "0.0.0.0/0"
-	machineSecurityGroupName    = "docker-machine"
-	defaultAmiId                = "ami-c60b90d1"
-	defaultRegion               = "us-east-1"
-	defaultInstanceType         = "t2.micro"
-	defaultDeviceName           = "/dev/sda1"
-	defaultRootSize             = 16
-	defaultVolumeType           = "gp2"
-	defaultZone                 = "a"
-	defaultSecurityGroup        = machineSecurityGroupName
-	defaultSSHPort              = 22
-	defaultSSHUser              = "ubuntu"
-	defaultSpotPrice            = "0.50"
-	defaultBlockDurationMinutes = 0
+	driverName                           = "amazonec2"
+	ipRange                              = "0.0.0.0/0"
+	machineSecurityGroupName             = "docker-machine"
+	defaultAmiId                         = "ami-08d4ac5b634553e16"
+	defaultRegion                        = "us-east-1"
+	defaultInstanceType                  = "t2.micro"
+	defaultDeviceName                    = "/dev/sda1"
+	defaultRootSize                      = 16
+	defaultVolumeType                    = "gp2"
+	defaultZone                          = "a"
+	defaultSecurityGroup                 = machineSecurityGroupName
+	defaultSSHPort                       = 22
+	defaultSSHUser                       = "ubuntu"
+	defaultSpotPrice                     = "0.50"
+	defaultBlockDurationMinutes          = 0
+	defaultMetadataTokenSetting          = "optional"
+	defaultMetadataTokenResponseHopLimit = 1
 )
 
 const (
@@ -59,6 +62,7 @@ var (
 	errorNoSubnetsFound                  = errors.New("The desired subnet could not be located in this region. Is '--amazonec2-subnet-id' or AWS_SUBNET_ID configured correctly?")
 	errorDisableSSLWithoutCustomEndpoint = errors.New("using --amazonec2-insecure-transport also requires --amazonec2-endpoint")
 	errorReadingUserData                 = errors.New("unable to read --amazonec2-userdata file")
+	errorUnprocessableResponse           = errors.New("unexpected AWS API response")
 )
 
 type Driver struct {
@@ -87,30 +91,34 @@ type Driver struct {
 	SecurityGroupName  string
 	SecurityGroupNames []string
 
-	SecurityGroupReadOnly   bool
-	OpenPorts               []string
-	Tags                    string
-	ReservationId           string
-	DeviceName              string
-	RootSize                int64
-	VolumeType              string
-	IamInstanceProfile      string
-	VpcId                   string
-	SubnetId                string
-	Zone                    string
-	keyPath                 string
-	RequestSpotInstance     bool
-	SpotPrice               string
-	BlockDurationMinutes    int64
-	PrivateIPOnly           bool
-	UsePrivateIP            bool
-	UseEbsOptimizedInstance bool
-	Monitoring              bool
-	SSHPrivateKeyPath       string
-	RetryCount              int
-	Endpoint                string
-	DisableSSL              bool
-	UserDataFile            string
+	SecurityGroupReadOnly         bool
+	OpenPorts                     []string
+	Tags                          string
+	ReservationId                 string
+	DeviceName                    string
+	RootSize                      int64
+	VolumeType                    string
+	VolumeEncrypted               bool
+	VolumeKmsKeyId                string
+	IamInstanceProfile            string
+	VpcId                         string
+	SubnetId                      string
+	Zone                          string
+	keyPath                       string
+	RequestSpotInstance           bool
+	SpotPrice                     string
+	BlockDurationMinutes          int64
+	PrivateIPOnly                 bool
+	UsePrivateIP                  bool
+	UseEbsOptimizedInstance       bool
+	Monitoring                    bool
+	SSHPrivateKeyPath             string
+	RetryCount                    int
+	Endpoint                      string
+	DisableSSL                    bool
+	UserDataFile                  string
+	MetadataTokenSetting          string
+	MetadataTokenResponseHopLimit int64
 
 	spotInstanceRequestId string
 }
@@ -207,6 +215,15 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Value:  defaultVolumeType,
 			EnvVar: "AWS_VOLUME_TYPE",
 		},
+		mcnflag.BoolFlag{
+			Name:  "amazonec2-volume-encrypted",
+			Usage: "Set this flag to encrypt storage volume",
+		},
+		mcnflag.StringFlag{
+			Name:   "amazonec2-volume-kms-key",
+			Usage:  "Amazon EBS KMS key id/arn used to encrypt volume",
+			EnvVar: "AWS_VOLUME_KMS_KEY",
+		},
 		mcnflag.StringFlag{
 			Name:   "amazonec2-iam-instance-profile",
 			Usage:  "AWS IAM Instance Profile",
@@ -285,6 +302,16 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "path to file with cloud-init user data",
 			EnvVar: "AWS_USERDATA",
 		},
+		mcnflag.StringFlag{
+			Name:  "amazonec2-metadata-token",
+			Usage: "Whether the metadata token is required or optional",
+			Value: defaultMetadataTokenSetting,
+		},
+		mcnflag.IntFlag{
+			Name:  "amazonec2-metadata-token-response-hop-limit",
+			Usage: "The number of network hops that the metadata token can travel",
+			Value: defaultMetadataTokenResponseHopLimit,
+		},
 	}
 }
 
@@ -306,6 +333,8 @@ func NewDriver(hostName, storePath string) *Driver {
 			MachineName: hostName,
 			StorePath:   storePath,
 		},
+		MetadataTokenSetting:          defaultMetadataTokenSetting,
+		MetadataTokenResponseHopLimit: defaultMetadataTokenResponseHopLimit,
 	}
 
 	driver.clientFactory = driver.buildClient
@@ -369,6 +398,8 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.DeviceName = flags.String("amazonec2-device-name")
 	d.RootSize = int64(flags.Int("amazonec2-root-size"))
 	d.VolumeType = flags.String("amazonec2-volume-type")
+	d.VolumeEncrypted = flags.Bool("amazonec2-volume-encrypted")
+	d.VolumeKmsKeyId = flags.String("amazonec2-volume-kms-key")
 	d.IamInstanceProfile = flags.String("amazonec2-iam-instance-profile")
 	d.SSHUser = flags.String("amazonec2-ssh-user")
 	d.SSHPort = flags.Int("amazonec2-ssh-port")
@@ -383,7 +414,8 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.RetryCount = flags.Int("amazonec2-retries")
 	d.OpenPorts = flags.StringSlice("amazonec2-open-port")
 	d.UserDataFile = flags.String("amazonec2-userdata")
-
+	d.MetadataTokenSetting = flags.String("amazonec2-metadata-token")
+	d.MetadataTokenResponseHopLimit = int64(flags.Int("amazonec2-metadata-token-response-hop-limit"))
 	d.DisableSSL = flags.Bool("amazonec2-insecure-transport")
 
 	if d.DisableSSL && d.Endpoint == "" {
@@ -602,6 +634,8 @@ func (d *Driver) Create() error {
 func (d *Driver) innerCreate() error {
 	log.Infof("Launching instance...")
 
+	tagSpecifications := d.createTagSpecifications()
+
 	if err := d.createKeyPair(); err != nil {
 		return fmt.Errorf("unable to create key pair: %s", err)
 	}
@@ -622,8 +656,12 @@ func (d *Driver) innerCreate() error {
 		Ebs: &ec2.EbsBlockDevice{
 			VolumeSize:          aws.Int64(d.RootSize),
 			VolumeType:          aws.String(d.VolumeType),
+			Encrypted:           aws.Bool(d.VolumeEncrypted),
 			DeleteOnTermination: aws.Bool(true),
 		},
+	}
+	if d.VolumeKmsKeyId != "" {
+		bdm.Ebs.KmsKeyId = aws.String(d.VolumeKmsKeyId)
 	}
 	netSpecs := []*ec2.InstanceNetworkInterfaceSpecification{{
 		DeviceIndex:              aws.Int64(0), // eth0
@@ -639,6 +677,7 @@ func (d *Driver) innerCreate() error {
 
 	if d.RequestSpotInstance {
 		req := ec2.RequestSpotInstancesInput{
+			TagSpecifications: tagSpecifications,
 			LaunchSpecification: &ec2.RequestSpotLaunchSpecification{
 				ImageId: &d.AMI,
 				Placement: &ec2.SpotPlacement{
@@ -664,7 +703,10 @@ func (d *Driver) innerCreate() error {
 
 		spotInstanceRequest, err := d.getClient().RequestSpotInstances(&req)
 		if err != nil {
-			return fmt.Errorf("Error request spot instance: %s", err)
+			return fmt.Errorf("Error request spot instance: %v", err)
+		}
+		if spotInstanceRequest == nil || len((*spotInstanceRequest).SpotInstanceRequests) < 1 {
+			return fmt.Errorf("error requesting spot instance: %v", errorUnprocessableResponse)
 		}
 		d.spotInstanceRequestId = *spotInstanceRequest.SpotInstanceRequests[0].SpotInstanceRequestId
 
@@ -699,6 +741,10 @@ func (d *Driver) innerCreate() error {
 				// Unexpected; no need to retry
 				return fmt.Errorf("Error describing previously made spot instance request: %v", err)
 			}
+			if resolvedSpotInstance == nil || len((*resolvedSpotInstance).SpotInstanceRequests) < 1 {
+				return fmt.Errorf("Error describing spot instance: %v", errorUnprocessableResponse)
+			}
+
 			maybeInstanceId := resolvedSpotInstance.SpotInstanceRequests[0].InstanceId
 			if maybeInstanceId != nil {
 				var instances *ec2.DescribeInstancesOutput
@@ -721,16 +767,21 @@ func (d *Driver) innerCreate() error {
 		}
 	} else {
 		inst, err := d.getClient().RunInstances(&ec2.RunInstancesInput{
-			ImageId:  &d.AMI,
-			MinCount: aws.Int64(1),
-			MaxCount: aws.Int64(1),
+			TagSpecifications: tagSpecifications,
+			ImageId:           &d.AMI,
+			MinCount:          aws.Int64(1),
+			MaxCount:          aws.Int64(1),
 			Placement: &ec2.Placement{
 				AvailabilityZone: &regionZone,
 			},
 			KeyName:           &d.KeyName,
 			InstanceType:      &d.InstanceType,
 			NetworkInterfaces: netSpecs,
-			Monitoring:        &ec2.RunInstancesMonitoringEnabled{Enabled: aws.Bool(d.Monitoring)},
+			MetadataOptions: &ec2.InstanceMetadataOptionsRequest{
+				HttpTokens:              &d.MetadataTokenSetting,
+				HttpPutResponseHopLimit: &d.MetadataTokenResponseHopLimit,
+			},
+			Monitoring: &ec2.RunInstancesMonitoringEnabled{Enabled: aws.Bool(d.Monitoring)},
 			IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
 				Name: &d.IamInstanceProfile,
 			},
@@ -740,7 +791,10 @@ func (d *Driver) innerCreate() error {
 		})
 
 		if err != nil {
-			return fmt.Errorf("Error launching instance: %s", err)
+			return fmt.Errorf("Error launching instance: %v", err)
+		}
+		if inst == nil || len(inst.Instances) < 1 {
+			return fmt.Errorf("error launching instance: %v", errorUnprocessableResponse)
 		}
 		instance = inst.Instances[0]
 	}
@@ -764,13 +818,6 @@ func (d *Driver) innerCreate() error {
 		d.PrivateIPAddress,
 	)
 
-	log.Debug("Settings tags for instance")
-	err := d.configureTags(d.Tags)
-
-	if err != nil {
-		return fmt.Errorf("Unable to tag instance %s: %s", d.InstanceId, err)
-	}
-
 	return nil
 }
 
@@ -791,6 +838,10 @@ func (d *Driver) GetURL() (string, error) {
 }
 
 func (d *Driver) GetIP() (string, error) {
+	if d.IPAddress != "" {
+		return d.IPAddress, nil
+	}
+
 	inst, err := d.getInstance()
 	if err != nil {
 		return "", err
@@ -859,6 +910,19 @@ func (d *Driver) GetSSHUsername() string {
 	}
 
 	return d.SSHUser
+}
+
+func (d *Driver) getEbsVolumeId() (string, error) {
+	inst, err := d.getInstance()
+	if err != nil {
+		return "", err
+	}
+
+	if len(inst.BlockDeviceMappings) == 0 || inst.BlockDeviceMappings[0].Ebs == nil {
+		return "", nil
+	}
+
+	return *inst.BlockDeviceMappings[0].Ebs.VolumeId, nil
 }
 
 func (d *Driver) Start() error {
@@ -941,6 +1005,10 @@ func (d *Driver) getInstance() (*ec2.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	if instances == nil || len(instances.Reservations) < 1 || len(instances.Reservations[0].Instances) < 1 {
+		return nil, fmt.Errorf("error getting instance: %v", errorUnprocessableResponse)
+	}
+
 	return instances.Reservations[0].Instances[0], nil
 }
 
@@ -1050,16 +1118,15 @@ func (d *Driver) securityGroupAvailableFunc(id string) func() bool {
 	}
 }
 
-func (d *Driver) configureTags(tagGroups string) error {
-
-	tags := []*ec2.Tag{}
+func (d *Driver) createTagSpecifications() []*ec2.TagSpecification {
+	var tags []*ec2.Tag
 	tags = append(tags, &ec2.Tag{
 		Key:   aws.String("Name"),
 		Value: &d.MachineName,
 	})
 
-	if tagGroups != "" {
-		t := strings.Split(tagGroups, ",")
+	if d.Tags != "" {
+		t := strings.Split(d.Tags, ",")
 		if len(t) > 0 && len(t)%2 != 0 {
 			log.Warnf("Tags are not key value in pairs. %d elements found", len(t))
 		}
@@ -1071,16 +1138,42 @@ func (d *Driver) configureTags(tagGroups string) error {
 		}
 	}
 
-	_, err := d.getClient().CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{&d.InstanceId},
-		Tags:      tags,
-	})
+	if d.RequestSpotInstance {
+		return []*ec2.TagSpecification{
+			{
+				ResourceType: aws.String("spot-instances-request"),
+				Tags:         tags,
+			},
+		}
+	} else {
+		return []*ec2.TagSpecification{
+			{
+				ResourceType: aws.String("instance"),
+				Tags:         tags,
+			},
+			{
+				ResourceType: aws.String("volume"),
+				Tags:         tags,
+			},
+			{
+				ResourceType: aws.String("network-interface"),
+				Tags:         tags,
+			},
+		}
+	}
+}
 
+func (d *Driver) getTagResources() []*string {
+	resources := []*string{&d.InstanceId}
+
+	volumeId, err := d.getEbsVolumeId()
 	if err != nil {
-		return err
+		log.Warnf("failed to get EBS volume ID: %s", err)
+
+		return resources
 	}
 
-	return nil
+	return append(resources, &volumeId)
 }
 
 func (d *Driver) configureSecurityGroups(groupNames []string) error {
