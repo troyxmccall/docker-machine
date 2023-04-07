@@ -43,6 +43,10 @@ func (provisioner *CoreOSProvisioner) String() string {
 	return "coreOS"
 }
 
+func (provisioner *CoreOSProvisioner) CompatibleWithHost() bool {
+	return provisioner.OsReleaseInfo.ID == provisioner.OsReleaseID || provisioner.OsReleaseInfo.IDLike == provisioner.OsReleaseID
+}
+
 func (provisioner *CoreOSProvisioner) SetHostname(hostname string) error {
 	log.Debugf("SetHostname: %s", hostname)
 
@@ -114,12 +118,9 @@ func (provisioner *CoreOSProvisioner) Provision(swarmOptions swarm.Options, auth
 		return err
 	}
 
-	if err := makeDockerOptionsDir(provisioner); err != nil {
+	if err := setupRemoteAuthOptions(provisioner); err != nil {
 		return err
 	}
-
-	log.Debugf("Preparing certificates")
-	provisioner.AuthOptions = setRemoteAuthOptions(provisioner)
 
 	log.Debugf("Setting up certificates")
 	if err := ConfigureAuth(provisioner); err != nil {

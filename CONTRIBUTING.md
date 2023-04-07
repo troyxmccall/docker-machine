@@ -1,3 +1,10 @@
+# Contributing to GitLab's fork of machine
+
+⚠   ️**NOTE THAT THIS FORK IS MAINTAINED FOR CRITICAL BUG FIXES AFFECTING RUNNING COSTS ONLY. 
+NO OTHER CONTRIBUTIONS WILL BE ACCEPTED.**  ⚠️
+
+For more information on the fixes we have added to this fork please see the [docs](https://docs.gitlab.com/runner/executors/docker_machine.html#forked-version-of-docker-machine).
+
 # Contributing to machine
 
 [![GoDoc](https://godoc.org/github.com/docker/machine?status.png)](https://godoc.org/github.com/docker/machine)
@@ -68,11 +75,11 @@ to clean-up build results.
 We use the usual `go` tools for this, to run those commands you need at least the linter which you can
 install with `go get -u golang.org/x/lint/golint`
 
-To run basic validation (dco, fmt), and the project unit tests, call:
+To run basic validation (fmt, test-short, lint, vet), and the project unit tests, call:
 
     $ make test
 
-If you want more indepth validation (vet, lint), and all tests with race detection, call:
+If you want all tests with race detection, call:
 
     $ make validate
 
@@ -143,7 +150,6 @@ Scrub build results:
     make fmt
     make vet
     make lint
-    make dco
 
 ### Managing dependencies
 

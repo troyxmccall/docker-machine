@@ -130,7 +130,9 @@ func (provisioner *UbuntuSystemdProvisioner) Provision(swarmOptions swarm.Option
 		return err
 	}
 
-	provisioner.AuthOptions = setRemoteAuthOptions(provisioner)
+	if err := setupRemoteAuthOptions(provisioner); err != nil {
+		return err
+	}
 
 	log.Debug("configuring auth")
 	if err := ConfigureAuth(provisioner); err != nil {
@@ -144,6 +146,15 @@ func (provisioner *UbuntuSystemdProvisioner) Provision(swarmOptions swarm.Option
 
 	// enable in systemd
 	log.Debug("enabling docker in systemd")
-	err = provisioner.Service("docker", serviceaction.Enable)
+	if err = provisioner.Service("docker", serviceaction.Enable); err != nil {
+		return err
+	}
+
+	// force restart docker in case it was already enabled in the base image
+	log.Debug("restart docker in systemd")
+	if err = provisioner.Service("docker", serviceaction.Restart); err != nil {
+		return err
+	}
+
 	return err
 }
